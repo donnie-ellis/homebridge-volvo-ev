@@ -1,0 +1,48 @@
+{
+  "pluginAlias": "VolvoEV",
+  "pluginType": "platform",
+  "singular": true,
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Name",
+        "type": "string",
+        "default": "Volvo EV",
+        "required": true
+      },
+      "oauthClientId": {
+        "title": "OAuth Client ID",
+        "type": "string",
+        "required": true,
+        "description": "OAuth client_id received from Volvo after publishing your app on developer.volvocars.com."
+      },
+      "oauthClientSecret": {
+        "title": "OAuth Client Secret",
+        "type": "string",
+        "required": true,
+        "x-schema-form": { "type": "password" },
+        "description": "OAuth client_secret received from Volvo after publishing your app."
+      },
+      "vccApiKey": {
+        "title": "VCC API Key",
+        "type": "string",
+        "required": true,
+        "description": "Your application's VCC-Api-Key from developer.volvocars.com."
+      },
+      "vin": {
+        "title": "VIN",
+        "type": "string",
+        "required": true,
+        "description": "Your vehicle's 17-character VIN."
+      },
+      "pollInterval": {
+        "title": "Poll Interval (seconds)",
+        "type": "integer",
+        "default": 120,
+        "minimum": 60,
+        "description": "How often to refresh vehicle data from the Volvo API. Minimum 60 seconds."
+      }
+    }
+  }
+}

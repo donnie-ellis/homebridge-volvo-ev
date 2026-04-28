@@ -1,0 +1,38 @@
+{
+  "name": "homebridge-volvo-ev",
+  "version": "1.0.0",
+  "description": "Homebridge plugin for Volvo EV via the Connected Vehicle API v2",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "prepublishOnly": "npm run build",
+    "lint": "eslint src --ext .ts"
+  },
+  "keywords": [
+    "homebridge-plugin",
+    "volvo",
+    "ev",
+    "homekit"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0",
+    "homebridge": ">=1.8.0"
+  },
+  "dependencies": {
+    "axios": "^1.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "homebridge": "^1.8.0",
+    "typescript": "^5.4.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "eslint": "^8.57.0"
+  },
+  "peerDependencies": {
+    "homebridge": "^1.8.0"
+  }
+}
