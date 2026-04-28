@@ -21,15 +21,18 @@ const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}/callback`;
 
 const SCOPES = [
   'openid',
-  'connected-vehicle:vehicle_relation:read',
-  'connected-vehicle:doors:read',
-  'connected-vehicle:windows:read',
-  'connected-vehicle:lock:read',
-  'connected-vehicle:lock:execute',
-  'connected-vehicle:recharge:read',
-  'connected-vehicle:engine:read',
-  'connected-vehicle:climatization:execute',
-  'connected-vehicle:horn-lights:execute',
+  'conve:vehicle_relation',       // basic vehicle access
+  'conve:command_accessibility',  // required for any command
+  'conve:commands',               // required for any command
+  'conve:doors_status',           // read door open/closed
+  'conve:windows_status',         // read window open/closed
+  'conve:lock_status',            // read lock state
+  'conve:lock',                   // lock command
+  'conve:unlock',                 // unlock command
+  'conve:battery_charge_level',   // read battery level
+  'conve:engine_status',          // read climatization running state
+  'conve:climatization_start_stop', // start/stop climatization
+  'conve:honk_flash',             // flash lights
 ].join(' ');
 
 interface TokenSet {
