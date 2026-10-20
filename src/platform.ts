@@ -9,7 +9,7 @@ import {
 } from 'homebridge';
 
 import { PLATFORM_NAME, PLUGIN_NAME } from './index.js';
-import { VolvoApiClient } from './api/client.js';
+import { VolvoApiClient, AuthRequiredError } from './api/client.js';
 import { VehicleCache } from './cache.js';
 import { LockAccessory } from './accessories/lock.js';
 import { BatteryAccessory } from './accessories/battery.js';
@@ -85,15 +85,27 @@ export class VolvoPlatform implements DynamicPlatformPlugin {
   }
 
   private async init(): Promise<void> {
-    await this.api.ensureAuthenticated();
-    await this.refreshCache();
+    // Accessories tolerate an empty cache, so register them before auth completes.
     this.registerAccessories();
+    this.api.onAuthorised = () => {
+      this.refreshCache().catch((err) => this.log.warn('Poll failed:', err));
+    };
     this.pollTimer = setInterval(() => {
       this.refreshCache().catch((err) => this.log.warn('Poll failed:', err));
     }, this.pollInterval);
+
+    // Starts the browser flow in the background if there are no stored tokens.
+    if (this.api.ensureAuthenticated()) {
+      await this.refreshCache();
+    }
   }
 
   public async refreshCache(): Promise<void> {
+    if (!this.api.ensureAuthenticated()) {
+      this.log.debug('Skipping poll: waiting for Volvo authorisation.');
+      return;
+    }
+
     const results = await Promise.allSettled([
       this.api.getDoors(),
       this.api.getWindows(),
@@ -103,6 +115,12 @@ export class VolvoPlatform implements DynamicPlatformPlugin {
     ]);
 
     const [doors, windows, lock, recharge, engine] = results;
+
+    // Auth failures are already logged by the client; don't repeat them five times.
+    if (results.some((r) => r.status === 'rejected' && r.reason instanceof AuthRequiredError)) {
+      this.log.warn('Poll skipped: Volvo authorisation required (see OAuth URL above).');
+      return;
+    }
 
     if (doors.status === 'fulfilled') this.cache.update({ doors: doors.value });
     else this.log.warn('Failed to fetch doors:', doors.reason);

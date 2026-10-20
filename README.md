@@ -35,11 +35,36 @@ Each capability is exposed as an independent HomeKit accessory:
 
 ## Installation
 
+The plugin is not yet published to npm, so install it from GitHub. npm builds it automatically during install.
+
+**Standard Homebridge install** (global npm):
+
 ```bash
-npm install -g homebridge-volvo-ev
+npm install -g github:donnie-ellis/homebridge-volvo-ev
 ```
 
-Or install via the Homebridge UI plugin search.
+**Homebridge Raspberry Pi / Debian image:**
+
+```bash
+sudo hb-service add github:donnie-ellis/homebridge-volvo-ev
+```
+
+**Homebridge Docker image** (run inside the container):
+
+```bash
+cd /homebridge && npm install github:donnie-ellis/homebridge-volvo-ev
+```
+
+**From a local clone** (for development):
+
+```bash
+git clone https://github.com/donnie-ellis/homebridge-volvo-ev.git
+cd homebridge-volvo-ev
+npm install          # also builds dist/
+npm install -g .
+```
+
+Restart Homebridge after installing. To update later, re-run the same install command and restart.
 
 ## Configuration
 
@@ -75,7 +100,19 @@ On first launch, the plugin cannot authenticate automatically — it needs you t
 4. After authorising, your browser will show a success message
 5. The plugin saves your tokens to `~/.homebridge/volvo-tokens.json` and continues normally
 
-From that point on, the plugin handles token refresh silently. You will not need to repeat this unless you revoke access or delete the token file.
+Accessories appear in HomeKit straight away; they show default values until authorisation completes. If you don't finish within 5 minutes, the plugin logs a fresh URL on the next poll.
+
+### Homebridge on another machine (Raspberry Pi, NAS, etc.)
+
+Volvo redirects your browser to `http://localhost:8999/callback`, i.e. the computer running the *browser*. The callback server only listens on the Homebridge host's loopback interface. If Homebridge runs elsewhere, forward the port over SSH from the computer you'll sign in on **before** opening the URL:
+
+```bash
+ssh -L 8999:localhost:8999 <user>@<homebridge-host>
+```
+
+Keep that session open until the browser shows the success message.
+
+From that point on, the plugin handles token refresh silently. If Volvo ever rejects the refresh token (e.g. you revoke access or change the OAuth client ID), the plugin discards the stored tokens and logs a new authorisation URL automatically.
 
 ## Data refresh
 
@@ -83,8 +120,11 @@ Vehicle state is fetched every `pollInterval` seconds (default 120). HomeKit req
 
 ## Troubleshooting
 
-**Plugin logs an auth URL on every restart**
-The token file is missing or corrupt. Delete `~/.homebridge/volvo-tokens.json` and complete the browser flow again.
+**Plugin logs an auth URL**
+There are no usable tokens: this is the first run, the token file was deleted or belongs to a different OAuth client ID, or Volvo rejected the refresh token. Complete the browser flow again (see above).
+
+**The browser can't reach `localhost:8999` after signing in**
+Homebridge is on a different machine. Set up the SSH port forward described above, then use the next URL the plugin logs.
 
 **Poll failures in the log**
 Usually means the car is out of mobile network range (e.g. in a garage with no signal). The plugin will retry on the next interval; stale values are served in the meantime.

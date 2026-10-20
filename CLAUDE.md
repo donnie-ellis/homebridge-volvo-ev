@@ -10,7 +10,7 @@ A Homebridge platform plugin that exposes a Volvo EV's connected vehicle data to
 - **Architecture**: Option B — multiple independent accessories (one per capability), not one monolithic accessory
 - **Language**: TypeScript
 - **Polling**: 120-second interval; accessories serve cached values instantly; commands trigger an immediate out-of-cycle refresh
-- **Auth**: OAuth 2.0 password grant — Volvo ID credentials + VCC API Key stored in `config.json`; plugin handles token acquisition and auto-refresh
+- **Auth**: OAuth 2.0 authorization code + PKCE — OAuth client ID/secret + VCC API Key stored in `config.json`; user completes a one-time browser flow, tokens persist in `<storagePath>/volvo-tokens.json` and auto-refresh
 - **Location**: Not exposed (HomeKit has no GPS concept)
 
 ---
@@ -57,8 +57,9 @@ homebridge-volvo-ev/
 
 **Base URL**: `https://api.volvocars.com/connected-vehicle/v2`
 
-**Auth endpoint**: `https://volvoid.eu.volvocars.com/as/token.oauth2`
-- Grant type: `password`
+**Auth endpoints**: `https://volvoid.eu.volvocars.com/as/authorization.oauth2` (browser), `https://volvoid.eu.volvocars.com/as/token.oauth2` (token)
+- Grant types: `authorization_code` (PKCE S256, redirect `http://localhost:8999/callback`), `refresh_token`
+- Token endpoint uses HTTP Basic auth with the OAuth client ID/secret
 - Required headers on all API calls: `vcc-api-key`, `Authorization: Bearer <token>`
 
 ### Endpoints used
@@ -90,10 +91,14 @@ homebridge-volvo-ev/
 
 ## Auth Flow
 
-1. On platform `init`, call `VolvoApiClient.authenticate()` — POST to token endpoint with username/password + client credentials
-2. Store `access_token`, `refresh_token`, `expires_at` (now + `expires_in` seconds) in memory
-3. Before every API call, `VolvoApiClient.ensureToken()` checks `expires_at`; if within 60s of expiry, refresh using the refresh token
-4. If refresh fails (e.g. session revoked), log an error and re-authenticate from credentials
+1. On `didFinishLaunching`, the platform registers accessories and starts polling immediately — it never blocks on auth
+2. `VolvoApiClient.ensureAuthenticated()` loads stored tokens (rejected if incomplete or saved for a different client ID); if none, it starts the browser flow in the background: logs the auth URL and listens on `127.0.0.1:8999` for 5 minutes. Only one flow runs at a time; on timeout, the next poll starts a new one
+3. On callback, exchange the code for tokens and persist them atomically (mode 0600). `onAuthorised` triggers an immediate poll
+4. `expires_at` = now + `expires_in` − 60s. Before each API call, `ensureToken()` refreshes if past `expires_at`. Concurrent callers share one in-flight refresh (refresh tokens may rotate)
+5. If a refresh response omits `refresh_token`, keep the previous one
+6. If the token endpoint rejects the refresh (400/401), delete stored tokens and restart the browser flow. Network errors keep tokens and retry later
+7. A 401 from the API forces one refresh (unless another caller already replaced that token) and retries once
+8. All errors leaving the client are rethrown with secrets stripped — never log a raw `AxiosError` (its config contains the bearer token and API key)
 
 ---
 
@@ -103,8 +108,8 @@ homebridge-volvo-ev/
 {
   "platform": "VolvoEV",
   "name": "Volvo EV",
-  "username": "you@example.com",
-  "password": "yourpassword",
+  "oauthClientId": "your-oauth-client-id",
+  "oauthClientSecret": "your-oauth-client-secret",
   "vccApiKey": "your-vcc-api-key",
   "vin": "YV1XXXXXXXXXX",
   "pollInterval": 120

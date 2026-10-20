@@ -16,8 +16,11 @@ import type {
 const TOKEN_URL = 'https://volvoid.eu.volvocars.com/as/token.oauth2';
 const AUTH_URL = 'https://volvoid.eu.volvocars.com/as/authorization.oauth2';
 const API_BASE = 'https://api.volvocars.com/connected-vehicle/v2';
+const CALLBACK_HOST = '127.0.0.1';
 const CALLBACK_PORT = 8999;
 const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}/callback`;
+const AUTH_FLOW_TIMEOUT_MS = 5 * 60 * 1000;
+const EXPIRY_MARGIN_S = 60;
 
 const SCOPES = [
   'openid',
@@ -41,17 +44,43 @@ interface TokenSet {
   expiresAt: number; // unix ms
 }
 
-function sanitiseAxiosError(err: unknown): string {
-  if (err instanceof AxiosError) {
-    const status = err.response?.status ?? 'no-response';
-    const body = JSON.stringify(err.response?.data ?? {});
-    return `HTTP ${status}: ${body}`;
+interface StoredTokens extends TokenSet {
+  clientId: string;
+}
+
+/** Thrown when no usable tokens exist and the user must complete the browser flow. */
+export class AuthRequiredError extends Error {
+  constructor() {
+    super('Not authorised with Volvo yet — complete the OAuth flow using the URL in the Homebridge log.');
+    this.name = 'AuthRequiredError';
   }
-  return String(err);
+}
+
+/**
+ * Builds a log-safe message from an error. Never include the AxiosError itself in
+ * logs: its config carries the Authorization and vcc-api-key headers.
+ */
+function sanitiseError(err: unknown): string {
+  if (err instanceof AxiosError) {
+    const status = err.response?.status ?? err.code ?? 'no-response';
+    const body = err.response?.data !== undefined ? ` ${JSON.stringify(err.response.data)}` : '';
+    return `HTTP ${status}:${body}`;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** True when the token endpoint rejected the grant itself (revoked/expired/unknown refresh token). */
+function isGrantRejected(err: unknown): boolean {
+  const status = err instanceof AxiosError ? err.response?.status : undefined;
+  return status === 400 || status === 401;
 }
 
 function base64url(buf: Buffer): string {
   return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 }
 
 function generatePkce(): { verifier: string; challenge: string } {
@@ -64,6 +93,11 @@ export class VolvoApiClient {
   private http: AxiosInstance;
   private token: TokenSet | null = null;
   private readonly tokenFile: string;
+  private refreshing: Promise<void> | null = null;
+  private authorising: Promise<void> | null = null;
+
+  /** Called after the browser flow completes and tokens are available. */
+  public onAuthorised?: () => void;
 
   constructor(
     private readonly vccApiKey: string,
@@ -79,29 +113,79 @@ export class VolvoApiClient {
 
   // --- Auth ---
 
-  async ensureAuthenticated(): Promise<void> {
+  isAuthenticated(): boolean {
+    return this.token !== null;
+  }
+
+  /**
+   * Loads stored tokens, or starts the browser flow in the background if there are none.
+   * Never blocks on user interaction. Returns true if tokens are available now.
+   */
+  ensureAuthenticated(): boolean {
+    if (this.token) {
+      return true;
+    }
     if (this.loadStoredTokens()) {
       this.log.info('Loaded stored Volvo tokens.');
+      return true;
+    }
+    this.beginAuthorisation();
+    return false;
+  }
+
+  /** Starts the browser flow unless one is already running. Errors are logged, not thrown. */
+  private beginAuthorisation(): void {
+    if (this.authorising) {
       return;
     }
-    this.log.warn('No stored tokens found — starting one-time OAuth flow.');
-    await this.runAuthCodeFlow();
+    this.log.warn('No valid Volvo tokens — starting OAuth flow.');
+    this.authorising = this.runAuthCodeFlow()
+      .then(() => this.onAuthorised?.())
+      .catch((err) => this.log.error(`Volvo OAuth flow failed: ${sanitiseError(err)} — will retry on next poll.`))
+      .finally(() => {
+        this.authorising = null;
+      });
   }
 
   private loadStoredTokens(): boolean {
+    let stored: Partial<StoredTokens>;
     try {
-      const raw = fs.readFileSync(this.tokenFile, 'utf8');
-      const stored = JSON.parse(raw) as TokenSet;
-      if (!stored.refreshToken) return false;
-      this.token = stored;
-      return true;
+      stored = JSON.parse(fs.readFileSync(this.tokenFile, 'utf8')) as Partial<StoredTokens>;
     } catch {
       return false;
     }
+    if (!stored.refreshToken || !stored.accessToken) {
+      this.log.warn('Stored Volvo token file is incomplete; ignoring it.');
+      return false;
+    }
+    if (stored.clientId !== this.oauthClientId) {
+      this.log.warn('Stored Volvo tokens belong to a different OAuth client ID; ignoring them.');
+      return false;
+    }
+    this.token = {
+      accessToken: stored.accessToken,
+      refreshToken: stored.refreshToken,
+      expiresAt: stored.expiresAt ?? 0,
+    };
+    return true;
   }
 
   private saveTokens(tokenSet: TokenSet): void {
-    fs.writeFileSync(this.tokenFile, JSON.stringify(tokenSet, null, 2), { mode: 0o600 });
+    const stored: StoredTokens = { ...tokenSet, clientId: this.oauthClientId };
+    const tmp = `${this.tokenFile}.${process.pid}.tmp`;
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(stored, null, 2), { mode: 0o600 });
+      fs.renameSync(tmp, this.tokenFile);
+      fs.chmodSync(this.tokenFile, 0o600);
+    } catch (err) {
+      this.log.error(`Failed to save Volvo tokens to ${this.tokenFile}: ${sanitiseError(err)}`);
+      fs.rmSync(tmp, { force: true });
+    }
+  }
+
+  private clearTokens(): void {
+    this.token = null;
+    fs.rmSync(this.tokenFile, { force: true });
   }
 
   private async runAuthCodeFlow(): Promise<void> {
@@ -117,202 +201,257 @@ export class VolvoApiClient {
       `&code_challenge=${challenge}` +
       `&code_challenge_method=S256`;
 
+    // Listen before printing the URL so a fast user can't beat the server.
+    const code = this.waitForAuthCode(state);
+
     this.log.warn('=== Volvo OAuth Setup Required ===');
     this.log.warn('Open the following URL in your browser to authorise the plugin:');
     this.log.warn(authUrl);
-    this.log.warn(`Waiting for callback on http://localhost:${CALLBACK_PORT}/callback ...`);
+    this.log.warn(`Waiting up to 5 minutes for the callback on ${REDIRECT_URI} ...`);
+    this.log.warn(
+      'If Homebridge runs on another machine, first forward the port from the computer with the browser: ' +
+      `ssh -L ${CALLBACK_PORT}:localhost:${CALLBACK_PORT} <user>@<homebridge-host>`,
+    );
 
-    const code = await this.waitForAuthCode(state);
-    await this.exchangeCodeForTokens(code, verifier);
+    await this.exchangeCodeForTokens(await code, verifier);
   }
 
   private waitForAuthCode(expectedState: string): Promise<string> {
     return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (err: Error | null, code?: string) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        server.close();
+        if (err) reject(err);
+        else resolve(code!);
+      };
+
       const server = http.createServer((req, res) => {
         const url = new URL(req.url ?? '/', `http://localhost:${CALLBACK_PORT}`);
-        const code = url.searchParams.get('code');
-        const state = url.searchParams.get('state');
-        const error = url.searchParams.get('error');
-
-        if (error) {
-          res.end('<h1>Authorisation failed</h1><p>' + error + '</p>');
-          server.close();
-          reject(new Error(`OAuth error: ${error} — ${url.searchParams.get('error_description')}`));
+        if (url.pathname !== '/callback') {
+          res.statusCode = 404;
+          res.end();
           return;
         }
 
-        if (!code || state !== expectedState) {
+        const code = url.searchParams.get('code');
+        const state = url.searchParams.get('state');
+        const error = url.searchParams.get('error');
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+
+        if (state !== expectedState) {
+          res.statusCode = 400;
+          res.end('<h1>Invalid callback</h1>');
+          return;
+        }
+
+        if (error) {
+          res.end(`<h1>Authorisation failed</h1><p>${escapeHtml(error)}</p>`);
+          finish(new Error(`OAuth error: ${error} — ${url.searchParams.get('error_description') ?? ''}`));
+          return;
+        }
+
+        if (!code) {
+          res.statusCode = 400;
           res.end('<h1>Invalid callback</h1>');
           return;
         }
 
         res.end('<h1>Authorisation successful!</h1><p>You can close this tab and return to Homebridge.</p>');
-        server.close();
-        resolve(code);
+        finish(null, code);
       });
 
-      server.listen(CALLBACK_PORT, () => {
-        this.log.debug(`OAuth callback server listening on port ${CALLBACK_PORT}`);
+      const timer = setTimeout(
+        () => finish(new Error('OAuth flow timed out after 5 minutes.')),
+        AUTH_FLOW_TIMEOUT_MS,
+      );
+
+      server.on('error', (err) => finish(err));
+      server.listen(CALLBACK_PORT, CALLBACK_HOST, () => {
+        this.log.debug(`OAuth callback server listening on ${CALLBACK_HOST}:${CALLBACK_PORT}`);
       });
-
-      server.on('error', reject);
-
-      // Time out after 5 minutes
-      setTimeout(() => {
-        server.close();
-        reject(new Error('OAuth flow timed out after 5 minutes.'));
-      }, 5 * 60 * 1000);
     });
+  }
+
+  private async postToken(params: URLSearchParams): Promise<Record<string, unknown>> {
+    const basicAuth = Buffer.from(`${this.oauthClientId}:${this.oauthClientSecret}`).toString('base64');
+    const res = await axios.post<Record<string, unknown>>(TOKEN_URL, params.toString(), {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: `Basic ${basicAuth}`,
+      },
+    });
+    return res.data;
   }
 
   private async exchangeCodeForTokens(code: string, verifier: string): Promise<void> {
-    const basicAuth = Buffer.from(`${this.oauthClientId}:${this.oauthClientSecret}`).toString('base64');
-    const params = new URLSearchParams({
-      grant_type: 'authorization_code',
-      code,
-      redirect_uri: REDIRECT_URI,
-      code_verifier: verifier,
-    });
-
+    let data: Record<string, unknown>;
     try {
-      const res = await axios.post(TOKEN_URL, params.toString(), {
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          Authorization: `Basic ${basicAuth}`,
-        },
-      });
-      this.token = this.parseTokenResponse(res.data);
-      this.saveTokens(this.token);
-      this.log.info('Volvo authorisation complete. Tokens saved.');
+      data = await this.postToken(new URLSearchParams({
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: REDIRECT_URI,
+        code_verifier: verifier,
+      }));
     } catch (err) {
-      throw new Error(`Token exchange failed: ${sanitiseAxiosError(err)}`);
+      throw new Error(`Token exchange failed: ${sanitiseError(err)}`);
     }
+    this.token = this.parseTokenResponse(data, null);
+    this.saveTokens(this.token);
+    this.log.info('Volvo authorisation complete. Tokens saved.');
   }
 
-  private async refreshAccessToken(): Promise<void> {
-    if (!this.token?.refreshToken) {
-      throw new Error('No refresh token available. Delete the token file and restart Homebridge to re-authenticate.');
-    }
-
-    const basicAuth = Buffer.from(`${this.oauthClientId}:${this.oauthClientSecret}`).toString('base64');
-    const params = new URLSearchParams({
-      grant_type: 'refresh_token',
-      refresh_token: this.token.refreshToken,
+  /** Refreshes the access token. Concurrent callers share a single in-flight request. */
+  private refreshAccessToken(): Promise<void> {
+    this.refreshing ??= this.doRefresh().finally(() => {
+      this.refreshing = null;
     });
-
-    try {
-      const res = await axios.post(TOKEN_URL, params.toString(), {
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          Authorization: `Basic ${basicAuth}`,
-        },
-      });
-      this.token = this.parseTokenResponse(res.data);
-      this.saveTokens(this.token);
-      this.log.debug('Access token refreshed.');
-    } catch (err) {
-      throw new Error(`Token refresh failed: ${sanitiseAxiosError(err)}`);
-    }
+    return this.refreshing;
   }
 
-  private parseTokenResponse(data: Record<string, unknown>): TokenSet {
+  private async doRefresh(): Promise<void> {
+    if (!this.token) {
+      throw new AuthRequiredError();
+    }
+
+    let data: Record<string, unknown>;
+    try {
+      data = await this.postToken(new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: this.token.refreshToken,
+      }));
+    } catch (err) {
+      if (isGrantRejected(err)) {
+        // The refresh token is dead; retrying it will never work. Start over.
+        this.log.error(`Volvo refresh token rejected (${sanitiseError(err)}); re-authorisation required.`);
+        this.clearTokens();
+        this.beginAuthorisation();
+        throw new AuthRequiredError();
+      }
+      // Network/server error — keep tokens and retry on the next call.
+      throw new Error(`Token refresh failed: ${sanitiseError(err)}`);
+    }
+
+    this.token = this.parseTokenResponse(data, this.token.refreshToken);
+    this.saveTokens(this.token);
+    this.log.debug('Access token refreshed.');
+  }
+
+  private parseTokenResponse(data: Record<string, unknown>, previousRefreshToken: string | null): TokenSet {
+    const accessToken = data['access_token'];
+    if (typeof accessToken !== 'string' || !accessToken) {
+      throw new Error('Token response did not contain an access_token.');
+    }
+    // Servers may omit refresh_token on refresh, meaning "keep using the old one".
+    const refreshToken = typeof data['refresh_token'] === 'string' && data['refresh_token']
+      ? data['refresh_token']
+      : previousRefreshToken;
+    if (!refreshToken) {
+      throw new Error('Token response did not contain a refresh_token.');
+    }
     const expiresIn = typeof data['expires_in'] === 'number' ? data['expires_in'] : 1800;
     return {
-      accessToken: data['access_token'] as string,
-      refreshToken: data['refresh_token'] as string,
-      expiresAt: Date.now() + (expiresIn - 60) * 1000,
+      accessToken,
+      refreshToken,
+      expiresAt: Date.now() + (expiresIn - EXPIRY_MARGIN_S) * 1000,
     };
   }
 
   private async ensureToken(): Promise<string> {
-    if (!this.token) {
-      await this.ensureAuthenticated();
-    } else if (Date.now() >= this.token.expiresAt) {
+    if (!this.ensureAuthenticated()) {
+      throw new AuthRequiredError();
+    }
+    if (Date.now() >= this.token!.expiresAt) {
       await this.refreshAccessToken();
     }
-    return this.token!.accessToken;
+    if (!this.token) {
+      throw new AuthRequiredError();
+    }
+    return this.token.accessToken;
   }
 
-  private async authHeaders(): Promise<Record<string, string>> {
-    const token = await this.ensureToken();
-    return {
-      Authorization: `Bearer ${token}`,
-      'vcc-api-key': this.vccApiKey,
-      'Content-Type': 'application/json',
-    };
+  /**
+   * Performs an authenticated API call. On a 401, forces one token refresh and retries.
+   * All errors are rethrown with secrets stripped so callers can log them safely.
+   */
+  private async request<T>(method: 'get' | 'post', urlPath: string): Promise<T> {
+    const send = (accessToken: string) => this.http.request<T>({
+      method,
+      url: urlPath,
+      data: method === 'post' ? {} : undefined,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'vcc-api-key': this.vccApiKey,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    try {
+      const accessToken = await this.ensureToken();
+      try {
+        return (await send(accessToken)).data;
+      } catch (err) {
+        if (!(err instanceof AxiosError) || err.response?.status !== 401) {
+          throw err;
+        }
+        // Only refresh if nobody else already replaced this token.
+        if (this.token?.accessToken === accessToken) {
+          this.log.debug(`401 from ${urlPath}; forcing token refresh.`);
+          await this.refreshAccessToken();
+        }
+        return (await send(await this.ensureToken())).data;
+      }
+    } catch (err) {
+      if (err instanceof AuthRequiredError) {
+        throw err;
+      }
+      throw new Error(`${method.toUpperCase()} ${urlPath} failed: ${sanitiseError(err)}`);
+    }
   }
 
   // --- GET endpoints ---
 
   async getDoors(): Promise<DoorState> {
-    const headers = await this.authHeaders();
-    const res = await this.http.get<VolvoApiResponse<DoorState>>(
-      `/vehicles/${this.vin}/doors`,
-      { headers },
-    );
-    return res.data.data;
+    return (await this.request<VolvoApiResponse<DoorState>>('get', `/vehicles/${this.vin}/doors`)).data;
   }
 
   async getWindows(): Promise<WindowState> {
-    const headers = await this.authHeaders();
-    const res = await this.http.get<VolvoApiResponse<WindowState>>(
-      `/vehicles/${this.vin}/windows`,
-      { headers },
-    );
-    return res.data.data;
+    return (await this.request<VolvoApiResponse<WindowState>>('get', `/vehicles/${this.vin}/windows`)).data;
   }
 
   async getLock(): Promise<LockState> {
-    const headers = await this.authHeaders();
-    const res = await this.http.get<VolvoApiResponse<LockState>>(
-      `/vehicles/${this.vin}/lock`,
-      { headers },
-    );
-    return res.data.data;
+    return (await this.request<VolvoApiResponse<LockState>>('get', `/vehicles/${this.vin}/lock`)).data;
   }
 
   async getRechargeState(): Promise<RechargeState> {
-    const headers = await this.authHeaders();
-    const res = await this.http.get<VolvoApiResponse<RechargeState>>(
-      `/vehicles/${this.vin}/recharge-state`,
-      { headers },
-    );
-    return res.data.data;
+    return (await this.request<VolvoApiResponse<RechargeState>>('get', `/vehicles/${this.vin}/recharge-state`)).data;
   }
 
   async getEngineStatus(): Promise<EngineState> {
-    const headers = await this.authHeaders();
-    const res = await this.http.get<VolvoApiResponse<EngineState>>(
-      `/vehicles/${this.vin}/engine-status`,
-      { headers },
-    );
-    return res.data.data;
+    return (await this.request<VolvoApiResponse<EngineState>>('get', `/vehicles/${this.vin}/engine-status`)).data;
   }
 
   // --- Commands ---
 
   async lock(): Promise<void> {
-    const headers = await this.authHeaders();
-    await this.http.post(`/vehicles/${this.vin}/commands/lock`, {}, { headers });
+    await this.request('post', `/vehicles/${this.vin}/commands/lock`);
   }
 
   async unlock(): Promise<void> {
-    const headers = await this.authHeaders();
-    await this.http.post(`/vehicles/${this.vin}/commands/unlock`, {}, { headers });
+    await this.request('post', `/vehicles/${this.vin}/commands/unlock`);
   }
 
   async startClimatization(): Promise<void> {
-    const headers = await this.authHeaders();
-    await this.http.post(`/vehicles/${this.vin}/commands/climatization-start`, {}, { headers });
+    await this.request('post', `/vehicles/${this.vin}/commands/climatization-start`);
   }
 
   async stopClimatization(): Promise<void> {
-    const headers = await this.authHeaders();
-    await this.http.post(`/vehicles/${this.vin}/commands/climatization-stop`, {}, { headers });
+    await this.request('post', `/vehicles/${this.vin}/commands/climatization-stop`);
   }
 
   async flash(): Promise<void> {
-    const headers = await this.authHeaders();
-    await this.http.post(`/vehicles/${this.vin}/commands/flash`, {}, { headers });
+    await this.request('post', `/vehicles/${this.vin}/commands/flash`);
   }
 }
