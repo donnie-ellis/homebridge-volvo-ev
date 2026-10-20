@@ -6,7 +6,11 @@ export interface VolvoApiResponse<T> {
 
 export type DoorStatus = 'OPEN' | 'CLOSED' | 'AJAR';
 
+export type CentralLockStatus = 'LOCKED' | 'UNLOCKED' | 'UNSPECIFIED';
+
+/** GET /connected-vehicle/v2/vehicles/{vin}/doors — doors plus central lock. */
 export interface DoorState {
+  centralLock?: { value: CentralLockStatus };
   frontLeft: { value: DoorStatus };
   frontRight: { value: DoorStatus };
   rearLeft: { value: DoorStatus };
@@ -26,27 +30,29 @@ export interface WindowState {
   rearRight: { value: WindowStatus };
 }
 
-// --- Lock ---
+// --- Energy (Battery) ---
 
-export type LockStatus = 'LOCKED' | 'UNLOCKED' | 'UNKNOWN';
-
-export interface LockState {
-  carLocked: { value: LockStatus };
+/**
+ * Energy API v2 field envelope. Unsupported fields arrive as
+ * { status: 'ERROR', code: 'NOT_SUPPORTED' } with no value.
+ */
+export interface EnergyField<T> {
+  status: 'OK' | 'ERROR';
+  value?: T;
+  unit?: string;
+  updatedAt?: string;
+  code?: string;
 }
 
-// --- Recharge (Battery) ---
+export type ChargingStatus = 'CHARGING' | 'DISCHARGING' | 'DONE' | 'ERROR' | 'IDLE' | 'SCHEDULED';
+export type ChargerConnectionStatus = 'CONNECTED' | 'DISCONNECTED' | 'FAULT';
 
-export type ChargingSystemStatus =
-  | 'CHARGING_SYSTEM_CHARGING'
-  | 'CHARGING_SYSTEM_IDLE'
-  | 'CHARGING_SYSTEM_FAULT'
-  | 'CHARGING_SYSTEM_UNSPECIFIED';
-
-export interface RechargeState {
-  batteryChargeLevel: { value: number }; // 0–100
-  chargingSystemStatus: { value: ChargingSystemStatus };
-  electricRange: { value: number }; // km
-  estimatedChargingTime: { value: number }; // minutes
+/** GET /energy/v2/vehicles/{vin}/state — top-level object, no `data` wrapper. */
+export interface EnergyState {
+  batteryChargeLevel?: EnergyField<number>; // percentage
+  electricRange?: EnergyField<number>; // km
+  chargingStatus?: EnergyField<ChargingStatus>;
+  chargerConnectionStatus?: EnergyField<ChargerConnectionStatus>;
 }
 
 // --- Engine / Climatization ---

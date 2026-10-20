@@ -31,7 +31,7 @@ export class LockAccessory {
 
   private getCurrentState(): CharacteristicValue {
     const { Characteristic } = this.platform;
-    const status = this.platform.cache.get().lock?.carLocked?.value;
+    const status = this.platform.cache.get().doors?.centralLock?.value;
     switch (status) {
       case 'LOCKED': return Characteristic.LockCurrentState.SECURED;
       case 'UNLOCKED': return Characteristic.LockCurrentState.UNSECURED;
@@ -41,7 +41,7 @@ export class LockAccessory {
 
   private getTargetState(): CharacteristicValue {
     const { Characteristic } = this.platform;
-    const status = this.platform.cache.get().lock?.carLocked?.value;
+    const status = this.platform.cache.get().doors?.centralLock?.value;
     return status === 'LOCKED'
       ? Characteristic.LockTargetState.SECURED
       : Characteristic.LockTargetState.UNSECURED;

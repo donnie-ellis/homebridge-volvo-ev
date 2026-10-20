@@ -2,7 +2,7 @@ import { PlatformAccessory, CharacteristicValue } from 'homebridge';
 import type { VolvoPlatform } from '../platform.js';
 import type { DoorState } from '../api/types.js';
 
-export type DoorKey = keyof DoorState;
+export type DoorKey = Exclude<keyof DoorState, 'centralLock'>;
 
 export class DoorAccessory {
   private readonly service;

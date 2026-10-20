@@ -19,7 +19,7 @@ A Homebridge platform plugin that exposes a Volvo EV's connected vehicle data to
 
 | Class | HomeKit Service | Reads | Commands |
 |---|---|---|---|
-| `LockAccessory` | `LockMechanism` | Current lock state | Lock, Unlock |
+| `LockAccessory` | `LockMechanism` | Current lock state (`centralLock` from `/doors`) | Lock, Unlock |
 | `BatteryAccessory` | `Battery` | Level %, ChargingState, StatusLowBattery | — |
 | `DoorAccessory` | `ContactSensor` | Open/closed per door (FL, FR, RL, RR, Hood, Trunk) | — |
 | `WindowAccessory` | `ContactSensor` | Open/closed per window (FL, FR, RL, RR) | — |
@@ -66,16 +66,22 @@ homebridge-volvo-ev/
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/vehicles/{vin}/doors` | Door open/closed states |
+| `GET` | `/vehicles/{vin}/doors` | Door open/closed states + `centralLock` |
 | `GET` | `/vehicles/{vin}/windows` | Window open/closed states |
-| `GET` | `/vehicles/{vin}/lock` | Lock status |
-| `GET` | `/vehicles/{vin}/recharge-state` | Battery level + charging state |
 | `GET` | `/vehicles/{vin}/engine-status` | Climatization running state |
 | `POST` | `/vehicles/{vin}/commands/lock` | Lock doors |
 | `POST` | `/vehicles/{vin}/commands/unlock` | Unlock doors |
 | `POST` | `/vehicles/{vin}/commands/climatization-start` | Start climatization |
 | `POST` | `/vehicles/{vin}/commands/climatization-stop` | Stop climatization |
 | `POST` | `/vehicles/{vin}/commands/flash` | Flash exterior lights |
+
+**Energy API v2** (`https://api.volvocars.com/energy/v2`, scope `energy:state:read`):
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/vehicles/{vin}/state` | Battery level, charging status, charger connection. Top-level object (no `data` wrapper); each field is `{status: 'OK'\|'ERROR', value?, unit?, updatedAt?}` |
+
+Connected Vehicle v2 has no `/lock` or `/recharge-state` endpoints (both 404).
 
 ---
 

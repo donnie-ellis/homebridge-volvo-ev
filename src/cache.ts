@@ -1,10 +1,9 @@
-import type { DoorState, WindowState, LockState, RechargeState, EngineState } from './api/types.js';
+import type { DoorState, WindowState, EnergyState, EngineState } from './api/types.js';
 
 export interface VehicleSnapshot {
   doors?: DoorState;
   windows?: WindowState;
-  lock?: LockState;
-  recharge?: RechargeState;
+  energy?: EnergyState;
   engine?: EngineState;
   lastUpdated?: number; // unix ms
 }

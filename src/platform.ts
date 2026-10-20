@@ -67,10 +67,11 @@ export class VolvoPlatform implements DynamicPlatformPlugin {
     this.pollInterval = (config.pollInterval ?? 120) * 1000;
 
     this.api = new VolvoApiClient(
-      config.vccApiKey,
-      config.vin,
-      config.oauthClientId,
-      config.oauthClientSecret,
+      // Trim: stray whitespace from copy-pasting credentials causes confusing 401s.
+      String(config.vccApiKey ?? '').trim(),
+      String(config.vin ?? '').trim(),
+      String(config.oauthClientId ?? '').trim(),
+      String(config.oauthClientSecret ?? '').trim(),
       hbApi.user.storagePath(),
       log,
     );
@@ -109,12 +110,11 @@ export class VolvoPlatform implements DynamicPlatformPlugin {
     const results = await Promise.allSettled([
       this.api.getDoors(),
       this.api.getWindows(),
-      this.api.getLock(),
-      this.api.getRechargeState(),
+      this.api.getEnergyState(),
       this.api.getEngineStatus(),
     ]);
 
-    const [doors, windows, lock, recharge, engine] = results;
+    const [doors, windows, energy, engine] = results;
 
     // Auth failures are already logged by the client; don't repeat them five times.
     if (results.some((r) => r.status === 'rejected' && r.reason instanceof AuthRequiredError)) {
@@ -128,11 +128,8 @@ export class VolvoPlatform implements DynamicPlatformPlugin {
     if (windows.status === 'fulfilled') this.cache.update({ windows: windows.value });
     else this.log.warn('Failed to fetch windows:', windows.reason);
 
-    if (lock.status === 'fulfilled') this.cache.update({ lock: lock.value });
-    else this.log.warn('Failed to fetch lock:', lock.reason);
-
-    if (recharge.status === 'fulfilled') this.cache.update({ recharge: recharge.value });
-    else this.log.warn('Failed to fetch recharge state:', recharge.reason);
+    if (energy.status === 'fulfilled') this.cache.update({ energy: energy.value });
+    else this.log.warn('Failed to fetch energy state:', energy.reason);
 
     if (engine.status === 'fulfilled') this.cache.update({ engine: engine.value });
     else this.log.warn('Failed to fetch engine status:', engine.reason);

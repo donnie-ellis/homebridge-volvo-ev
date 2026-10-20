@@ -7,8 +7,7 @@ import type { Logger } from 'homebridge';
 import type {
   DoorState,
   WindowState,
-  LockState,
-  RechargeState,
+  EnergyState,
   EngineState,
   VolvoApiResponse,
 } from './types.js';
@@ -16,6 +15,7 @@ import type {
 const TOKEN_URL = 'https://volvoid.eu.volvocars.com/as/token.oauth2';
 const AUTH_URL = 'https://volvoid.eu.volvocars.com/as/authorization.oauth2';
 const API_BASE = 'https://api.volvocars.com/connected-vehicle/v2';
+const ENERGY_API_BASE = 'https://api.volvocars.com/energy/v2';
 const CALLBACK_HOST = '127.0.0.1';
 const CALLBACK_PORT = 8999;
 const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}/callback`;
@@ -29,10 +29,10 @@ const SCOPES = [
   'conve:commands',               // required for any command
   'conve:doors_status',           // read door open/closed
   'conve:windows_status',         // read window open/closed
-  'conve:lock_status',            // read lock state
+  'conve:lock_status',            // read central lock state (part of /doors)
   'conve:lock',                   // lock command
   'conve:unlock',                 // unlock command
-  'conve:battery_charge_level',   // read battery level
+  'energy:state:read',            // read battery level + charging state (Energy API v2)
   'conve:engine_status',          // read climatization running state
   'conve:climatization_start_stop', // start/stop climatization
   'conve:honk_flash',             // flash lights
@@ -46,6 +46,7 @@ interface TokenSet {
 
 interface StoredTokens extends TokenSet {
   clientId: string;
+  scopes?: string;
 }
 
 /** Thrown when no usable tokens exist and the user must complete the browser flow. */
@@ -73,6 +74,11 @@ function sanitiseError(err: unknown): string {
 function isGrantRejected(err: unknown): boolean {
   const status = err instanceof AxiosError ? err.response?.status : undefined;
   return status === 400 || status === 401;
+}
+
+/** True when an API 401 is about the vcc-api-key header rather than the access token. */
+function isApiKeyRejected(err: AxiosError): boolean {
+  return /vcc-api-key/i.test(JSON.stringify(err.response?.data ?? ''));
 }
 
 function base64url(buf: Buffer): string {
@@ -162,6 +168,10 @@ export class VolvoApiClient {
       this.log.warn('Stored Volvo tokens belong to a different OAuth client ID; ignoring them.');
       return false;
     }
+    if (stored.scopes !== SCOPES) {
+      this.log.warn('The plugin now needs different Volvo permissions; re-authorisation required.');
+      return false;
+    }
     this.token = {
       accessToken: stored.accessToken,
       refreshToken: stored.refreshToken,
@@ -171,7 +181,7 @@ export class VolvoApiClient {
   }
 
   private saveTokens(tokenSet: TokenSet): void {
-    const stored: StoredTokens = { ...tokenSet, clientId: this.oauthClientId };
+    const stored: StoredTokens = { ...tokenSet, clientId: this.oauthClientId, scopes: SCOPES };
     const tmp = `${this.tokenFile}.${process.pid}.tmp`;
     try {
       fs.writeFileSync(tmp, JSON.stringify(stored, null, 2), { mode: 0o600 });
@@ -396,6 +406,13 @@ export class VolvoApiClient {
         if (!(err instanceof AxiosError) || err.response?.status !== 401) {
           throw err;
         }
+        if (isApiKeyRejected(err)) {
+          // A new access token won't help; the key itself is bad.
+          throw new Error(
+            'Volvo rejected the VCC API key. Check "vccApiKey" in your config matches the ' +
+            'Primary or Secondary key of an active application on developer.volvocars.com.',
+          );
+        }
         // Only refresh if nobody else already replaced this token.
         if (this.token?.accessToken === accessToken) {
           this.log.debug(`401 from ${urlPath}; forcing token refresh.`);
@@ -421,12 +438,9 @@ export class VolvoApiClient {
     return (await this.request<VolvoApiResponse<WindowState>>('get', `/vehicles/${this.vin}/windows`)).data;
   }
 
-  async getLock(): Promise<LockState> {
-    return (await this.request<VolvoApiResponse<LockState>>('get', `/vehicles/${this.vin}/lock`)).data;
-  }
-
-  async getRechargeState(): Promise<RechargeState> {
-    return (await this.request<VolvoApiResponse<RechargeState>>('get', `/vehicles/${this.vin}/recharge-state`)).data;
+  async getEnergyState(): Promise<EnergyState> {
+    // Absolute URL overrides the Connected Vehicle baseURL.
+    return this.request<EnergyState>('get', `${ENERGY_API_BASE}/vehicles/${this.vin}/state`);
   }
 
   async getEngineStatus(): Promise<EngineState> {

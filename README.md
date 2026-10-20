@@ -30,6 +30,7 @@ Each capability is exposed as an independent HomeKit accessory:
 - A Volvo ID account
 - A published application on [developer.volvocars.com](https://developer.volvocars.com) with:
   - A **VCC API Key**
+  - Access to both the **Connected Vehicle API** and the **Energy API** (battery level comes from the Energy API)
   - OAuth **client_id** and **client_secret** (emailed to you after publishing)
   - `http://localhost:8999/callback` registered as a redirect URI
 

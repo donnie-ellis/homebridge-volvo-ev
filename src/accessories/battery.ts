@@ -34,23 +34,33 @@ export class BatteryAccessory {
       .onGet(() => this.getLowBatteryStatus());
   }
 
+  /** Battery level 0–100, or undefined if the car hasn't reported one. */
+  private level(): number | undefined {
+    const field = this.platform.cache.get().energy?.batteryChargeLevel;
+    return field?.status === 'OK' && typeof field.value === 'number'
+      ? Math.max(0, Math.min(100, Math.round(field.value)))
+      : undefined;
+  }
+
   private getBatteryLevel(): CharacteristicValue {
-    return this.platform.cache.get().recharge?.batteryChargeLevel?.value ?? 0;
+    return this.level() ?? 0;
   }
 
   private getChargingState(): CharacteristicValue {
     const { Characteristic } = this.platform;
-    const status = this.platform.cache.get().recharge?.chargingSystemStatus?.value;
-    switch (status) {
-      case 'CHARGING_SYSTEM_CHARGING': return Characteristic.ChargingState.CHARGING;
-      case 'CHARGING_SYSTEM_FAULT': return Characteristic.ChargingState.NOT_CHARGEABLE;
-      default: return Characteristic.ChargingState.NOT_CHARGING;
-    }
+    const energy = this.platform.cache.get().energy;
+    const status = energy?.chargingStatus?.status === 'OK' ? energy.chargingStatus.value : undefined;
+    const connection = energy?.chargerConnectionStatus?.status === 'OK'
+      ? energy.chargerConnectionStatus.value
+      : undefined;
+    if (status === 'CHARGING') return Characteristic.ChargingState.CHARGING;
+    if (status === 'ERROR' || connection === 'FAULT') return Characteristic.ChargingState.NOT_CHARGEABLE;
+    return Characteristic.ChargingState.NOT_CHARGING;
   }
 
   private getLowBatteryStatus(): CharacteristicValue {
     const { Characteristic } = this.platform;
-    const level = this.platform.cache.get().recharge?.batteryChargeLevel?.value ?? 100;
+    const level = this.level() ?? 100;
     return level <= LOW_BATTERY_THRESHOLD
       ? Characteristic.StatusLowBattery.BATTERY_LEVEL_LOW
       : Characteristic.StatusLowBattery.BATTERY_LEVEL_NORMAL;
