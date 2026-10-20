@@ -65,6 +65,9 @@ export interface EngineState {
 
 // --- Commands ---
 
+/** data node of a POST /commands/{name} response. Status values beyond COMPLETED aren't documented. */
 export interface CommandResponse {
-  invokeStatus: 'COMPLETED' | 'FAILED' | 'UNKNOWN';
+  vin?: string;
+  invokeStatus?: string;
+  message?: string;
 }

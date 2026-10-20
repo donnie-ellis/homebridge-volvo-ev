@@ -26,6 +26,11 @@ export interface VolvoConfig extends PlatformConfig {
   pollInterval?: number;
 }
 
+/** Repeats of the same command within this window are dropped (the car rejects them anyway). */
+const COMMAND_COOLDOWN_MS = 10_000;
+/** Give the car time to act before re-reading its state after a command. */
+const POST_COMMAND_REFRESH_MS = 15_000;
+
 const DOOR_KEYS: DoorKey[] = ['frontLeft', 'frontRight', 'rearLeft', 'rearRight', 'hood', 'tailgate'];
 const DOOR_NAMES: Record<DoorKey, string> = {
   frontLeft: 'Front Left Door',
@@ -54,6 +59,10 @@ export class VolvoPlatform implements DynamicPlatformPlugin {
 
   private readonly pollInterval: number;
   private pollTimer?: ReturnType<typeof setInterval>;
+  private refreshTimer?: ReturnType<typeof setTimeout>;
+  private refreshing: Promise<void> | null = null;
+  private readonly commandsInFlight = new Set<string>();
+  private readonly lastCommandAt = new Map<string, number>();
 
   constructor(
     public readonly log: Logger,
@@ -101,9 +110,66 @@ export class VolvoPlatform implements DynamicPlatformPlugin {
     }
   }
 
-  public async refreshCache(): Promise<void> {
+  /**
+   * Runs a vehicle command in the background so HomeKit writes return immediately.
+   * Volvo commands take several seconds; if a write handler waits on them, HomeKit times
+   * out and re-sends the write, issuing duplicate commands. Duplicates of a command that
+   * is in flight or just succeeded are dropped.
+   */
+  public runCommand(
+    name: string,
+    send: () => Promise<string | undefined>,
+    onSuccess?: (status: string | undefined) => void,
+    onFailure?: () => void,
+  ): void {
+    const sinceLast = Date.now() - (this.lastCommandAt.get(name) ?? 0);
+    if (this.commandsInFlight.has(name) || sinceLast < COMMAND_COOLDOWN_MS) {
+      this.log.debug(`Ignoring duplicate ${name} request.`);
+      return;
+    }
+
+    this.commandsInFlight.add(name);
+    this.log.info(`Sending ${name} command...`);
+    send()
+      .then((status) => {
+        this.lastCommandAt.set(name, Date.now());
+        this.log.info(`${name} command completed${status ? ` (status: ${status})` : ''}.`);
+        onSuccess?.(status);
+        this.scheduleRefresh(POST_COMMAND_REFRESH_MS);
+      })
+      .catch((err) => {
+        this.log.error(`${name} command failed: ${err instanceof Error ? err.message : String(err)}`);
+        onFailure?.();
+      })
+      .finally(() => {
+        this.commandsInFlight.delete(name);
+      });
+  }
+
+  /** Debounced out-of-cycle refresh; repeated calls push the refresh back. */
+  public scheduleRefresh(delayMs: number): void {
+    clearTimeout(this.refreshTimer);
+    this.refreshTimer = setTimeout(() => {
+      this.refreshCache().catch((err) => this.log.warn('Poll failed:', err));
+    }, delayMs);
+  }
+
+  /** Polls all endpoints. Concurrent callers share one in-flight poll. */
+  public refreshCache(): Promise<void> {
+    this.refreshing ??= this.doRefresh().finally(() => {
+      this.refreshing = null;
+    });
+    return this.refreshing;
+  }
+
+  private async doRefresh(): Promise<void> {
     if (!this.api.ensureAuthenticated()) {
       this.log.debug('Skipping poll: waiting for Volvo authorisation.');
+      return;
+    }
+    const wait = this.api.rateLimitRemaining();
+    if (wait > 0) {
+      this.log.debug(`Skipping poll: rate limited for ${wait}s.`);
       return;
     }
 

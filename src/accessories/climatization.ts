@@ -30,19 +30,13 @@ export class ClimatizationAccessory {
     return status === 'RUNNING';
   }
 
-  private async setOn(value: CharacteristicValue): Promise<void> {
-    try {
-      if (value) {
-        await this.platform.api.startClimatization();
-        this.platform.log.info('Climatization started.');
-      } else {
-        await this.platform.api.stopClimatization();
-        this.platform.log.info('Climatization stopped.');
-      }
-      await this.platform.refreshCache();
-    } catch (err) {
-      this.platform.log.error('Climatization command failed:', err);
-      throw err;
-    }
+  private setOn(value: CharacteristicValue): void {
+    const { Characteristic } = this.platform;
+    this.platform.runCommand(
+      value ? 'Climatization start' : 'Climatization stop',
+      () => (value ? this.platform.api.startClimatization() : this.platform.api.stopClimatization()),
+      undefined,
+      () => this.service.updateCharacteristic(Characteristic.On, this.getOn()),
+    );
   }
 }

@@ -9,6 +9,7 @@ import type {
   WindowState,
   EnergyState,
   EngineState,
+  CommandResponse,
   VolvoApiResponse,
 } from './types.js';
 
@@ -57,6 +58,22 @@ export class AuthRequiredError extends Error {
   }
 }
 
+/** Thrown without calling the API while Volvo's rate limit is in effect. */
+export class RateLimitedError extends Error {
+  constructor(seconds: number) {
+    super(`Volvo API rate limit hit — try again in ${seconds}s.`);
+    this.name = 'RateLimitedError';
+  }
+}
+
+/** Seconds to back off after a 429, from Retry-After or the "Try again in N seconds" message. */
+function retryAfterSeconds(err: AxiosError): number {
+  const header = Number(err.response?.headers?.['retry-after']);
+  if (header > 0) return header;
+  const match = /(\d+)\s*seconds?/i.exec(JSON.stringify(err.response?.data ?? ''));
+  return match ? Number(match[1]) : 60;
+}
+
 /**
  * Builds a log-safe message from an error. Never include the AxiosError itself in
  * logs: its config carries the Authorization and vcc-api-key headers.
@@ -101,6 +118,7 @@ export class VolvoApiClient {
   private readonly tokenFile: string;
   private refreshing: Promise<void> | null = null;
   private authorising: Promise<void> | null = null;
+  private rateLimitedUntil = 0;
 
   /** Called after the browser flow completes and tokens are available. */
   public onAuthorised?: () => void;
@@ -121,6 +139,11 @@ export class VolvoApiClient {
 
   isAuthenticated(): boolean {
     return this.token !== null;
+  }
+
+  /** Seconds remaining on a Volvo rate-limit backoff, or 0. */
+  rateLimitRemaining(): number {
+    return Math.max(0, Math.ceil((this.rateLimitedUntil - Date.now()) / 1000));
   }
 
   /**
@@ -398,11 +421,21 @@ export class VolvoApiClient {
       },
     });
 
+    const wait = this.rateLimitRemaining();
+    if (wait > 0) {
+      throw new RateLimitedError(wait);
+    }
+
     try {
       const accessToken = await this.ensureToken();
       try {
         return (await send(accessToken)).data;
       } catch (err) {
+        if (err instanceof AxiosError && err.response?.status === 429) {
+          const seconds = retryAfterSeconds(err);
+          this.rateLimitedUntil = Date.now() + seconds * 1000;
+          throw new RateLimitedError(seconds);
+        }
         if (!(err instanceof AxiosError) || err.response?.status !== 401) {
           throw err;
         }
@@ -421,7 +454,7 @@ export class VolvoApiClient {
         return (await send(await this.ensureToken())).data;
       }
     } catch (err) {
-      if (err instanceof AuthRequiredError) {
+      if (err instanceof AuthRequiredError || err instanceof RateLimitedError) {
         throw err;
       }
       throw new Error(`${method.toUpperCase()} ${urlPath} failed: ${sanitiseError(err)}`);
@@ -448,24 +481,33 @@ export class VolvoApiClient {
   }
 
   // --- Commands ---
+  // Each returns the car's invokeStatus (e.g. 'COMPLETED') when the API reports one.
 
-  async lock(): Promise<void> {
-    await this.request('post', `/vehicles/${this.vin}/commands/lock`);
+  private async command(name: string): Promise<string | undefined> {
+    const res = await this.request<VolvoApiResponse<CommandResponse> | undefined>(
+      'post',
+      `/vehicles/${this.vin}/commands/${name}`,
+    );
+    return res?.data?.invokeStatus;
   }
 
-  async unlock(): Promise<void> {
-    await this.request('post', `/vehicles/${this.vin}/commands/unlock`);
+  lock(): Promise<string | undefined> {
+    return this.command('lock');
   }
 
-  async startClimatization(): Promise<void> {
-    await this.request('post', `/vehicles/${this.vin}/commands/climatization-start`);
+  unlock(): Promise<string | undefined> {
+    return this.command('unlock');
   }
 
-  async stopClimatization(): Promise<void> {
-    await this.request('post', `/vehicles/${this.vin}/commands/climatization-stop`);
+  startClimatization(): Promise<string | undefined> {
+    return this.command('climatization-start');
   }
 
-  async flash(): Promise<void> {
-    await this.request('post', `/vehicles/${this.vin}/commands/flash`);
+  stopClimatization(): Promise<string | undefined> {
+    return this.command('climatization-stop');
+  }
+
+  flash(): Promise<string | undefined> {
+    return this.command('flash');
   }
 }

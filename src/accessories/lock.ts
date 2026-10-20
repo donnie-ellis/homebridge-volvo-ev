@@ -47,20 +47,25 @@ export class LockAccessory {
       : Characteristic.LockTargetState.UNSECURED;
   }
 
-  private async setTargetState(value: CharacteristicValue): Promise<void> {
+  private setTargetState(value: CharacteristicValue): void {
     const { Characteristic } = this.platform;
-    try {
-      if (value === Characteristic.LockTargetState.SECURED) {
-        await this.platform.api.lock();
-        this.platform.log.info('Lock command sent.');
-      } else {
-        await this.platform.api.unlock();
-        this.platform.log.info('Unlock command sent.');
-      }
-      await this.platform.refreshCache();
-    } catch (err) {
-      this.platform.log.error('Lock command failed:', err);
-      throw err;
-    }
+    const locking = value === Characteristic.LockTargetState.SECURED;
+
+    // HomeKit shows "Locking…/Unlocking…" until LockCurrentState catches up.
+    this.platform.runCommand(
+      locking ? 'Lock' : 'Unlock',
+      () => (locking ? this.platform.api.lock() : this.platform.api.unlock()),
+      (status) => {
+        // The car confirmed it; show the new state now instead of waiting for the next poll.
+        if (status === 'COMPLETED') {
+          this.platform.cache.setCentralLock(locking ? 'LOCKED' : 'UNLOCKED');
+          this.service.updateCharacteristic(Characteristic.LockCurrentState, this.getCurrentState());
+        }
+      },
+      () => {
+        // Revert the target so HomeKit stops spinning.
+        this.service.updateCharacteristic(Characteristic.LockTargetState, this.getTargetState());
+      },
+    );
   }
 }

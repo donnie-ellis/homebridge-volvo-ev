@@ -91,7 +91,9 @@ Connected Vehicle v2 has no `/lock` or `/recharge-state` endpoints (both 404).
 2. Each tick calls `VolvoApiClient.pollAll()` which fires all GET endpoints in parallel (`Promise.allSettled`)
 3. Results are written into `VehicleCache` — failed endpoints leave the prior cached value intact and log a warning
 4. All accessory `GET` handlers read from `VehicleCache` synchronously — no blocking
-5. All accessory `SET` handlers call the API directly, `await` the result, then call `platform.refreshCache()` for an immediate re-poll
+5. All accessory `SET` handlers call `platform.runCommand()` and return immediately — never `await` a Volvo command in a HomeKit write handler. Commands take several seconds; HomeKit times out and re-sends the write, issuing duplicate commands (→ car 422s and API 429s)
+6. `runCommand` drops duplicates of a command that is in flight or succeeded within 10s, reverts the HomeKit target on failure, and schedules a debounced refresh 15s later (the car needs time to report the new state). Lock applies `COMPLETED` optimistically
+7. On HTTP 429 the client backs off for the server-specified time; polls and commands skip the API until it expires
 
 ---
 
